@@ -1,0 +1,25 @@
+{
+  "name": "whatsapp-streaming-bot",
+  "version": "1.0.0",
+  "description": "WhatsApp bot for managing streaming account renewals",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "whatsapp",
+    "bot",
+    "streaming",
+    "renewal"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "node-schedule": "^2.1.1",
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0",
+    "sqlite3": "^5.1.6",
+    "whatsapp-web.js": "^1.34.2"
+  }
+}
