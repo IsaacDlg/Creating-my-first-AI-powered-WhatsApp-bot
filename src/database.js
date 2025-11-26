@@ -1,7 +1,9 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 
-const dbPath = path.join(__dirname, '..', 'streaming_bot.db');
+const dbPath = process.env.DATA_DIR
+    ? path.join(process.env.DATA_DIR, 'streaming_bot.db')
+    : path.join(__dirname, '..', 'streaming_bot.db');
 const db = new sqlite3.Database(dbPath);
 
 function run(sql, params = []) {
@@ -39,7 +41,8 @@ async function initDatabase() {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 phone TEXT UNIQUE NOT NULL,
                 name TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                is_active BOOLEAN DEFAULT 1
             )
         `);
 
@@ -65,11 +68,48 @@ async function initDatabase() {
             )
         `);
 
+        // Create Account Costs table
+        await run(`
+            CREATE TABLE IF NOT EXISTS account_costs (
+                email TEXT PRIMARY KEY,
+                service_name TEXT NOT NULL,
+                cost_price REAL DEFAULT 0,
+                bought_date DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Create Licenses table
+        await run(`
+            CREATE TABLE IF NOT EXISTS licenses (
+                key TEXT PRIMARY KEY,
+                duration_days INTEGER NOT NULL,
+                is_used BOOLEAN DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Create System Config table
+        await run(`
+            CREATE TABLE IF NOT EXISTS system_config (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        `);
+
         // Migration: Add columns if they don't exist (for existing databases)
         try { await run('ALTER TABLE subscriptions ADD COLUMN email TEXT'); } catch (e) { }
         try { await run('ALTER TABLE subscriptions ADD COLUMN password TEXT'); } catch (e) { }
         try { await run('ALTER TABLE subscriptions ADD COLUMN profile_name TEXT'); } catch (e) { }
         try { await run('ALTER TABLE subscriptions ADD COLUMN profile_pin TEXT'); } catch (e) { }
+        try { await run('ALTER TABLE subscriptions ADD COLUMN sale_price REAL DEFAULT 0'); } catch (e) { }
+        try { await run('ALTER TABLE subscriptions ADD COLUMN is_full_account BOOLEAN DEFAULT 0'); } catch (e) { }
+        try { await run('ALTER TABLE clients ADD COLUMN is_active BOOLEAN DEFAULT 1'); } catch (e) { }
+
+        // Performance Indices
+        await run('CREATE INDEX IF NOT EXISTS idx_subscriptions_client_id ON subscriptions(client_id)');
+        await run('CREATE INDEX IF NOT EXISTS idx_subscriptions_email ON subscriptions(email)');
+        await run('CREATE INDEX IF NOT EXISTS idx_subscriptions_service_name ON subscriptions(service_name)');
+        await run('CREATE INDEX IF NOT EXISTS idx_clients_name ON clients(name)');
 
         console.log('Database initialized.');
     } catch (err) {
@@ -83,11 +123,12 @@ async function addClient(phone, name) {
 }
 
 async function getClientByPhone(phone) {
-    return get('SELECT * FROM clients WHERE phone = ?', [phone]);
+    return get('SELECT * FROM clients WHERE phone = ? AND is_active = 1', [phone]);
 }
 
-async function addSubscription(clientId, serviceName, expiryDate, email, password, profileName, profilePin) {
-    return run('INSERT INTO subscriptions (client_id, service_name, expiry_date, email, password, profile_name, profile_pin) VALUES (?, ?, ?, ?, ?, ?, ?)', [clientId, serviceName, expiryDate, email, password, profileName, profilePin]);
+async function addSubscription(clientId, serviceName, expiryDate, email, password, profileName, profilePin, salePrice = 0, isFullAccount = 0) {
+    return run('INSERT INTO subscriptions (client_id, service_name, expiry_date, email, password, profile_name, profile_pin, sale_price, is_full_account) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [clientId, serviceName, expiryDate, email, password, profileName, profilePin, salePrice, isFullAccount]);
 }
 
 async function getExpiringSubscriptions(days = 3) {
@@ -113,15 +154,15 @@ async function deleteClient(phone) {
     const client = await getClientByPhone(phone);
     if (!client) return false;
 
-    // Delete subscriptions first
-    await run('DELETE FROM subscriptions WHERE client_id = ?', [client.id]);
-    // Delete client
-    await run('DELETE FROM clients WHERE id = ?', [client.id]);
+    // Soft delete subscriptions
+    await run('UPDATE subscriptions SET is_active = 0 WHERE client_id = ?', [client.id]);
+    // Soft delete client
+    await run('UPDATE clients SET is_active = 0 WHERE id = ?', [client.id]);
     return true;
 }
 
 async function deleteSubscriptionById(id) {
-    return run('DELETE FROM subscriptions WHERE id = ?', [id]);
+    return run('UPDATE subscriptions SET is_active = 0 WHERE id = ?', [id]);
 }
 
 async function getAllClientsWithSubs() {
@@ -129,7 +170,7 @@ async function getAllClientsWithSubs() {
         SELECT s.id, c.phone, c.name, s.service_name, s.expiry_date, s.profile_name, s.profile_pin, s.email, s.password 
         FROM clients c 
         LEFT JOIN subscriptions s ON c.id = s.client_id 
-        WHERE s.is_active = 1
+        WHERE s.is_active = 1 AND c.is_active = 1
         ORDER BY c.name
     `);
 }
@@ -186,13 +227,7 @@ async function getSubscriptionsByEmail(email) {
 }
 
 async function deleteSubscriptionsByEmail(email) {
-    // 1. Get affected clients to return them (optional, but good for logging)
-    const affected = await getSubscriptionsByEmail(email);
-
-    // 2. Delete (or deactivate)
-    await run('DELETE FROM subscriptions WHERE email = ?', [email]);
-
-    return affected;
+    return run('UPDATE subscriptions SET is_active = 0 WHERE email = ?', [email]);
 }
 
 async function updateSubscriptionById(id, fields) {
@@ -222,20 +257,155 @@ async function updateClient(phone, newName, newPhone) {
 
 async function getClientsWithCount(searchTerm = '') {
     let query = `
-        SELECT c.id, c.name, c.phone, COUNT(s.id) as sub_count 
+        SELECT c.*, COUNT(s.id) as sub_count 
         FROM clients c 
         LEFT JOIN subscriptions s ON c.id = s.client_id AND s.is_active = 1
+        WHERE c.is_active = 1
     `;
+    const params = [];
 
-    let params = [];
     if (searchTerm) {
-        query += ` WHERE c.name LIKE ? OR c.phone LIKE ?`;
+        query += ' AND (c.name LIKE ? OR c.phone LIKE ?)';
         params.push(`%${searchTerm}%`, `%${searchTerm}%`);
     }
 
-    query += ` GROUP BY c.id ORDER BY c.name`;
-
+    query += ' GROUP BY c.id ORDER BY c.name';
     return all(query, params);
+}
+
+async function getClientCount() {
+    const result = await get('SELECT COUNT(*) as count FROM clients WHERE is_active = 1');
+    return result ? result.count : 0;
+}
+
+async function getTotalSubscriptionCount() {
+    const res = await get('SELECT COUNT(*) as count FROM subscriptions WHERE is_active = 1');
+    return res ? res.count : 0;
+}
+
+async function getExpiringCount(days = 7) {
+    const res = await get(`
+        SELECT COUNT(*) as count 
+        FROM subscriptions 
+        WHERE is_active = 1 
+        AND date(expiry_date) <= date('now', '+' || ? || ' days')
+        AND date(expiry_date) >= date('now')
+    `, [days]);
+    return res ? res.count : 0;
+}
+
+async function getTopPlatforms() {
+    return all(`
+        SELECT service_name, COUNT(*) as count 
+        FROM subscriptions 
+        WHERE is_active = 1 
+        GROUP BY service_name 
+        ORDER BY count DESC 
+        LIMIT 3
+    `);
+}
+
+async function getAllClientPhones() {
+    return all('SELECT phone FROM clients WHERE is_active = 1');
+}
+
+async function addAccountCost(email, serviceName, cost) {
+    return run(
+        'INSERT OR REPLACE INTO account_costs (email, service_name, cost_price) VALUES (?, ?, ?)',
+        [email, serviceName, cost]
+    );
+}
+
+async function getAccountCost(email) {
+    return get('SELECT cost_price FROM account_costs WHERE email = ?', [email]);
+}
+
+async function updateSubscriptionPrice(id, price, isFullAccount = 0) {
+    return run(
+        'UPDATE subscriptions SET sale_price = ?, is_full_account = ? WHERE id = ?',
+        [price, isFullAccount, id]
+    );
+}
+
+async function getFinancialStats() {
+    // Calculate total revenue (ALL subscriptions, active or inactive)
+    const revenue = await get('SELECT SUM(sale_price) as total FROM subscriptions');
+
+    // Calculate costs for ALL unique accounts ever used
+    const allEmails = await all('SELECT DISTINCT email FROM subscriptions');
+    let totalCost = 0;
+
+    for (const row of allEmails) {
+        if (row.email) {
+            const costRow = await get('SELECT cost_price FROM account_costs WHERE email = ?', [row.email]);
+            if (costRow) {
+                totalCost += costRow.cost_price;
+            }
+        }
+    }
+
+    return {
+        revenue: revenue.total || 0,
+        cost: totalCost,
+        profit: (revenue.total || 0) - totalCost
+    };
+}
+
+// Licensing Functions
+async function createLicense(key, days) {
+    return run('INSERT INTO licenses (key, duration_days) VALUES (?, ?)', [key, days]);
+}
+
+async function getLicense(key) {
+    return get('SELECT * FROM licenses WHERE key = ?', [key]);
+}
+
+async function markLicenseUsed(key) {
+    return run('UPDATE licenses SET is_used = 1 WHERE key = ?', [key]);
+}
+
+async function getLicenseExpiry() {
+    const res = await get('SELECT value FROM system_config WHERE key = ?', ['license_expiry']);
+    return res ? res.value : null;
+}
+
+async function updateLicenseExpiry(newDate) {
+    return run('INSERT OR REPLACE INTO system_config (key, value) VALUES (?, ?)', ['license_expiry', newDate]);
+}
+
+async function setCountryCode(code) {
+    return run('INSERT OR REPLACE INTO system_config (key, value) VALUES (?, ?)', ['country_code', code]);
+}
+
+async function getCountryCode() {
+    const res = await get('SELECT value FROM system_config WHERE key = ?', ['country_code']);
+    return res ? res.value : '593'; // Default to 593 (Ecuador)
+}
+
+// This function replaces the existing getExpiringSubscriptions
+async function getExpiringSubscriptions(days) {
+    const today = new Date();
+    const futureDate = new Date();
+    futureDate.setDate(today.getDate() + days);
+
+    const futureStr = futureDate.toISOString().split('T')[0];
+
+    // Query: Active clients with subs expiring <= futureDate (includes expired ones)
+    // We want to show expired ones too, so we just check expiry_date <= futureStr
+    // But maybe we want to limit how far back? For now, let's show all expired + upcoming.
+    // Actually, usually "expiring soon" implies active ones.
+    // But user said "proximos a caducar [los que les resta 3 dias o vencidas]".
+    // So simply expiry_date <= futureStr.
+
+    const query = `
+        SELECT c.id, c.name, c.phone, s.id as sub_id, s.service_name, s.expiry_date, s.email, s.password
+        FROM clients c
+        JOIN subscriptions s ON c.id = s.client_id
+        WHERE c.is_active = 1 AND s.expiry_date <= ?
+        ORDER BY s.expiry_date ASC
+    `;
+
+    return all(query, [futureStr]);
 }
 
 module.exports = {
@@ -247,6 +417,7 @@ module.exports = {
     getAllSubscriptions,
     renewSubscription,
     deleteClient,
+    deleteSubscriptionById,
     getAllClientsWithSubs,
     updateSubscription,
     updateBulkSubscriptions,
@@ -255,6 +426,21 @@ module.exports = {
     deleteSubscriptionsByEmail,
     updateSubscriptionById,
     updateClient,
-    deleteSubscriptionById,
-    getClientsWithCount
+    getClientsWithCount,
+    getClientCount,
+    getTotalSubscriptionCount,
+    getExpiringCount,
+    getTopPlatforms,
+    getAllClientPhones,
+    addAccountCost,
+    getAccountCost,
+    updateSubscriptionPrice,
+    getFinancialStats,
+    createLicense,
+    getLicense,
+    markLicenseUsed,
+    getLicenseExpiry,
+    updateLicenseExpiry,
+    setCountryCode,
+    getCountryCode
 };
