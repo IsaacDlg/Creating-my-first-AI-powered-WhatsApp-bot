@@ -5,3 +5,11 @@ node_modules
 .DS_Store
 *.db
 *.csv
+debug_*.js
+test_*.js
+verify_*.js
+deploy_client.js
+.wwebjs_cache
+temp/
+GUIA_VENTAS.md
+run.sh

@@ -39,7 +39,9 @@ const client = new Client({
     authStrategy: new LocalAuth({
         dataPath: process.env.DATA_DIR ? process.env.DATA_DIR : './.wwebjs_auth'
     }),
-    webVersionCache: { type: 'none' },
+    // webVersionCache: { type: 'none' },
+    // authTimeoutMs: 0, // Keep disabled to prevent forcing
+    // qrMaxRetries: 0, // Keep disabled to prevent forcing
     puppeteer: {
         args: [
             '--no-sandbox',
@@ -56,7 +58,10 @@ const client = new Client({
             '--disable-default-apps',
             '--mute-audio',
             '--no-default-browser-check',
-            '--autoplay-policy=user-gesture-required'
+            '--autoplay-policy=user-gesture-required',
+            '--headless=new',
+            '--disable-software-rasterizer',
+            '--blink-settings=imagesEnabled=false'
         ]
     }
 });
@@ -90,7 +95,9 @@ client.on('disconnected', () => {
 
 client.on('message_create', async msg => {
     console.log('[INDEX] Event received:', msg.body);
+    console.time('Message Processing Time');
     await botLogic.handleMessage(msg);
+    console.timeEnd('Message Processing Time');
 });
 
 client.initialize().then(() => {
@@ -130,7 +137,7 @@ const server = http.createServer(async (req, res) => {
         <html>
             <head>
                 <title>WhatsApp Bot Status</title>
-                <meta http-equiv="refresh" content="5"> <!-- Auto refresh every 5s -->
+                <meta http-equiv="refresh" content="15"> <!-- Auto refresh every 15s -->
                 <style>
                     body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background: #f0f2f5; margin: 0; }
                     .container { text-align: center; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); max-width: 400px; width: 90%; }

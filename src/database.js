@@ -399,13 +399,44 @@ async function getExpiringSubscriptions(days) {
 
     const query = `
         SELECT c.id, c.name, c.phone, s.id as sub_id, s.service_name, s.expiry_date, s.email, s.password
-        FROM clients c
         JOIN subscriptions s ON c.id = s.client_id
         WHERE c.is_active = 1 AND s.expiry_date <= ?
         ORDER BY s.expiry_date ASC
     `;
 
     return all(query, [futureStr]);
+}
+
+function updateSubscriptionByDetails(phone, serviceName, updates) {
+    return new Promise((resolve, reject) => {
+        // First find the client ID
+        db.get("SELECT id FROM clients WHERE phone = ?", [phone], (err, client) => {
+            if (err) return reject(err);
+            if (!client) return resolve(false); // Client not found
+
+            // Construct SQL query dynamically based on updates
+            const fields = [];
+            const values = [];
+
+            if (updates.expiry_date) { fields.push("expiry_date = ?"); values.push(updates.expiry_date); }
+            if (updates.email) { fields.push("email = ?"); values.push(updates.email); }
+            if (updates.password) { fields.push("password = ?"); values.push(updates.password); }
+            if (updates.profile_name) { fields.push("profile_name = ?"); values.push(updates.profile_name); }
+            if (updates.profile_pin) { fields.push("profile_pin = ?"); values.push(updates.profile_pin); }
+
+            if (fields.length === 0) return resolve(true); // No updates needed
+
+            values.push(client.id);
+            values.push(serviceName);
+
+            const sql = `UPDATE subscriptions SET ${fields.join(", ")} WHERE client_id = ? AND service_name = ?`;
+
+            db.run(sql, values, function (err) {
+                if (err) reject(err);
+                else resolve(this.changes > 0);
+            });
+        });
+    });
 }
 
 module.exports = {
@@ -442,5 +473,6 @@ module.exports = {
     getLicenseExpiry,
     updateLicenseExpiry,
     setCountryCode,
-    getCountryCode
+    getCountryCode,
+    updateSubscriptionByDetails
 };
