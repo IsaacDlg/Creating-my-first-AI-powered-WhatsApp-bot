@@ -343,7 +343,8 @@ async function handleMessage(msg) {
     // if (msg.fromMe && body.toLowerCase().startsWith('!admin_gen')) return;
 
     // PREVENT INFINITE LOOP: Ignore messages sent by the bot itself (starting with prefix)
-    if (msg.fromMe && body.startsWith(BOT_PREFIX)) return;
+    // REMOVED: To allow owner to use bot from host phone. Bot replies must NOT start with a valid command.
+    // if (msg.fromMe && body.startsWith(BOT_PREFIX)) return;
 
     // --- SILENCE MODE CHECK ---
     if (!isBotActive) {
