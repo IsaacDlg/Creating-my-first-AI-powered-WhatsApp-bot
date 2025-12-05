@@ -1,3 +1,4 @@
+estará en pausa hasta terminar Diciembre
 # 🤖 WhatsApp Streaming Bot
 
 [🇪🇸 Español](#español) | [🇺🇸 English](#english)
