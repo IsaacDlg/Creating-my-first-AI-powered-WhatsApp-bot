@@ -10,6 +10,7 @@ primary_region = 'dfw'
 
 [env]
   DATA_DIR = '/data'
+  SUPER_ADMIN_NUMBER = '593959878305'
 
 [[mounts]]
   source = 'bot_data'

@@ -339,8 +339,8 @@ async function handleMessage(msg) {
     // if (msg.fromMe) return;
 
     // PREVENT SELF-RESPONSE FOR ADMIN COMMANDS
-    // REMOVED: We WANT the owner to be able to use !admin_gen from their own phone.
-    // if (msg.fromMe && body.toLowerCase().startsWith('!admin_gen')) return;
+    // We want the owner to be able to use !admin_gen from their own phone.
+    if (msg.fromMe && !body.startsWith('!')) return;
 
     // PREVENT INFINITE LOOP: Ignore messages sent by the bot itself (starting with prefix)
     // REMOVED: To allow owner to use bot from host phone. Bot replies must NOT start with a valid command.
@@ -366,7 +366,7 @@ async function handleMessage(msg) {
     // --- LICENSE CHECK ---
     // Super Admin Bypass: The owner never expires
     // Use the helper function instead of hardcoded string check
-    if (isSuperAdmin(chatId)) {
+    if (isSuperAdmin(msg.from)) {
         // Proceed without checking license
     } else {
         // Use cached expiry if available, otherwise fetch from DB
