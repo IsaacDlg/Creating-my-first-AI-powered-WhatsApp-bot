@@ -17,11 +17,14 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "google-auth-library": "^10.5.0",
+    "google-spreadsheet": "^5.0.2",
     "node-cron": "^4.2.1",
     "node-schedule": "^2.1.1",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
     "sqlite3": "^5.1.6",
+    "tesseract.js": "^6.0.1",
     "whatsapp-web.js": "^1.34.2",
     "xlsx": "^0.18.5"
   }

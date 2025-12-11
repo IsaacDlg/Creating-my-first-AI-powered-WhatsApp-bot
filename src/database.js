@@ -35,6 +35,9 @@ function all(sql, params = []) {
 
 async function initDatabase() {
     try {
+        // Enable WAL Mode for concurrency
+        await run('PRAGMA journal_mode = WAL');
+
         // Create Clients table
         await run(`
             CREATE TABLE IF NOT EXISTS clients (
@@ -42,9 +45,17 @@ async function initDatabase() {
                 phone TEXT UNIQUE NOT NULL,
                 name TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                is_active BOOLEAN DEFAULT 1
+                is_active BOOLEAN DEFAULT 1,
+                referral_code TEXT UNIQUE,
+                referred_by INTEGER,
+                referral_points INTEGER DEFAULT 0
             )
         `);
+
+        // Migration for existing tables (safe add columns)
+        try { await run('ALTER TABLE clients ADD COLUMN referral_code TEXT UNIQUE'); } catch (e) { }
+        try { await run('ALTER TABLE clients ADD COLUMN referred_by INTEGER'); } catch (e) { }
+        try { await run('ALTER TABLE clients ADD COLUMN referral_points INTEGER DEFAULT 0'); } catch (e) { }
 
         // Create Services table
         await run(`
@@ -474,5 +485,27 @@ module.exports = {
     updateLicenseExpiry,
     setCountryCode,
     getCountryCode,
-    updateSubscriptionByDetails
+    getCountryCode,
+    updateSubscriptionByDetails,
+
+    // Referral System
+    setClientReferralCode: async (clientId, code) => {
+        return run('UPDATE clients SET referral_code = ? WHERE id = ?', [code, clientId]);
+    },
+    getClientByReferralCode: async (code) => {
+        return get('SELECT * FROM clients WHERE referral_code = ?', [code]);
+    },
+    linkClientToReferrer: async (clientId, referrerId) => {
+        return run('UPDATE clients SET referred_by = ? WHERE id = ?', [referrerId, clientId]);
+    },
+    addReferralPoint: async (referrerId) => {
+        return run('UPDATE clients SET referral_points = referral_points + 1 WHERE id = ?', [referrerId]);
+    },
+    redeemReferralPoints: async (clientId, points) => {
+        return run('UPDATE clients SET referral_points = referral_points - ? WHERE id = ?', [points, clientId]);
+    },
+
+    vacuum: async () => {
+        await run('VACUUM');
+    }
 };

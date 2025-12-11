@@ -6,7 +6,17 @@ const fs = require('fs');
 const path = require('path');
 
 // State Machine for Interactive Flows
-const userStates = {}; // chatId -> { step, data }
+const stateManager = require('./stateManager');
+const logger = require('./logger');
+const messageQueue = require('./messageQueue');
+const ocrService = require('./ocrService');
+
+// Initialize State Manager
+stateManager.init();
+
+// State Machine for Interactive Flows
+// This object is now a Proxy that saves to 'bot_state.json' on every change!
+const userStates = stateManager.getPersistentState();
 const BOT_PREFIX = '🤖 ';
 
 const PLATFORMS = {
@@ -344,7 +354,7 @@ async function handleMessage(msg) {
 
     // PREVENT INFINITE LOOP: Ignore messages sent by the bot itself (starting with prefix)
     // REMOVED: To allow owner to use bot from host phone. Bot replies must NOT start with a valid command.
-    // if (msg.fromMe && body.startsWith(BOT_PREFIX)) return;
+    if (msg.fromMe && body.startsWith(BOT_PREFIX)) return;
 
     // --- SILENCE MODE CHECK ---
     if (!isBotActive) {
@@ -400,6 +410,35 @@ async function handleMessage(msg) {
     }
     // --------------------------------
 
+    // --- OCR & RECEIPT HANDLER ---
+    if (msg.hasMedia && !msg.fromMe) {
+        // Only process if user is NOT in a specific sensitive flow (like file upload)
+        // actually, let's allow it globally for now as a "shortcut"
+        try {
+            const media = await msg.downloadMedia();
+            if (media && media.mimetype.includes('image')) {
+                const buffer = Buffer.from(media.data, 'base64');
+                const receiptData = await ocrService.processReceipt(buffer);
+
+                if (receiptData && receiptData.amount) {
+                    // RECEIPT DETECTED!
+                    await msg.reply(BOT_PREFIX + `🔎 *Comprobante Detectado*\n\n🏦 Banco: ${receiptData.bank}\n💰 Monto: $${receiptData.amount}\n📄 Ref: ${receiptData.reference || 'N/A'}\n\n¿Deseas reportar este pago? (SI/NO)`);
+
+                    userStates[chatId] = {
+                        step: 'CONFIRM_OCR_PAYMENT',
+                        data: { receipt: receiptData },
+                        lastInteraction: Date.now()
+                    };
+                    console.timeEnd('Processing Time');
+                    return;
+                }
+            }
+        } catch (e) {
+            console.error('OCR Processing Failed', e);
+        }
+    }
+    // -----------------------------
+
     // Check for interactive flow
     if (userStates[chatId]) {
         const lastInteraction = userStates[chatId].lastInteraction || 0;
@@ -437,52 +476,89 @@ async function handleMessage(msg) {
                                 return;
                             }
 
-                            let importedClients = 0;
-                            let importedSubs = 0;
-                            let errors = 0;
+                            // 1. SMART HEADER DETECTION
+                            const headers = data[0]; // First row
+                            const headerMap = {};
 
+                            // Helper to find index by fuzzy keywords
+                            const findCol = (keywords) => {
+                                return headers.findIndex(h => {
+                                    if (!h) return false;
+                                    const str = String(h).toLowerCase();
+                                    return keywords.some(k => str.includes(k));
+                                });
+                            };
+
+                            headerMap.phone = findCol(['telef', 'celular', 'phone', 'movil', 'numero']);
+                            headerMap.name = findCol(['nombre', 'name', 'cliente', 'usuario']);
+                            headerMap.service = findCol(['servicio', 'plataforma', 'cuenta', 'service']);
+                            headerMap.email = findCol(['email', 'correo', 'mail']);
+                            headerMap.password = findCol(['pass', 'cont', 'clave']);
+                            headerMap.expiry = findCol(['venc', 'expir', 'fecha', 'date']);
+                            headerMap.pin = findCol(['pin', 'perfil']);
+
+                            // Fallback to defaults if headers not found (User might have no headers, just data)
+                            // If index -1, try default positions: 0=Phone, 1=Name, 2=Service, 3=Email, 4=Pass, 5=Date, 6=Pin
+                            if (headerMap.phone === -1) headerMap.phone = 0;
+                            if (headerMap.name === -1) headerMap.name = 1;
+                            if (headerMap.service === -1) headerMap.service = 2;
+                            if (headerMap.email === -1) headerMap.email = 3;
+                            if (headerMap.password === -1) headerMap.password = 4;
+                            if (headerMap.expiry === -1) headerMap.expiry = 5;
+                            if (headerMap.pin === -1) headerMap.pin = 6;
+
+                            let validRows = [];
+                            let skipped = 0;
+
+                            // Start from row 1 (assuming row 0 is header)
                             for (let i = 1; i < data.length; i++) {
                                 const row = data[i];
                                 if (!row || row.length < 2) continue;
 
-                                const rawPhone = row[0] ? String(row[0]) : null;
-                                const name = row[1] ? String(row[1]) : 'Sin Nombre';
-                                const service = row[2] ? String(row[2]) : 'Servicio Importado';
-                                const email = row[3] ? String(row[3]) : '';
-                                const password = row[4] ? String(row[4]) : '';
-                                const expiry = row[5] ? String(row[5]) : '';
-                                const pin = row[6] ? String(row[6]) : ''; // New PIN column
-
-                                if (!rawPhone) { errors++; continue; }
+                                const rawPhone = row[headerMap.phone] ? String(row[headerMap.phone]) : null;
+                                // Basic validation
+                                if (!rawPhone) { skipped++; continue; }
                                 const phone = normalizePhone(rawPhone);
-                                if (!phone) { errors++; continue; }
+                                if (!phone) { skipped++; continue; }
 
-                                try {
-                                    let clientId;
-                                    const existingClient = await db.getClientByPhone(phone);
-                                    if (existingClient) {
-                                        clientId = existingClient.id;
-                                    } else {
-                                        clientId = await db.addClient(phone, name);
-                                        importedClients++;
-                                    }
-
-                                    // Corrected Order: clientId, serviceName, expiryDate, email, password, profileName, profilePin
-                                    await db.addSubscription(clientId, service, expiry, email, password, 'Perfil Importado', pin);
-                                    importedSubs++;
-                                } catch (e) {
-                                    console.error('Import Error Row ' + i, e);
-                                    errors++;
-                                }
+                                validRows.push({
+                                    phone: phone,
+                                    name: row[headerMap.name] ? String(row[headerMap.name]) : 'Sin Nombre',
+                                    service: row[headerMap.service] ? String(row[headerMap.service]) : 'Importado',
+                                    email: row[headerMap.email] ? String(row[headerMap.email]) : '',
+                                    password: row[headerMap.password] ? String(row[headerMap.password]) : '',
+                                    expiry: row[headerMap.expiry] ? String(row[headerMap.expiry]) : '',
+                                    pin: row[headerMap.pin] ? String(row[headerMap.pin]) : ''
+                                });
                             }
 
-                            await msg.reply(BOT_PREFIX + `✅ *IMPORTACIÓN FINALIZADA*\n\n` +
-                                `👥 Clientes Nuevos: ${importedClients}\n` +
-                                `📺 Suscripciones: ${importedSubs}\n` +
-                                `❌ Errores/Omitidos: ${errors}`);
+                            if (validRows.length === 0) {
+                                await msg.reply(BOT_PREFIX + '⚠️ No se encontraron filas válidas. Revisa las columnas.');
+                                delete userStates[chatId];
+                                return;
+                            }
 
-                            delete userStates[chatId];
+                            // 2. PREVIEW AND CONFIRMATION
+                            userStates[chatId] = {
+                                step: 'IMPORT_CONFIRM',
+                                data: { importPreview: validRows },
+                                lastInteraction: Date.now()
+                            };
+
+                            let previewMsg = BOT_PREFIX + `📝 *PREVISUALIZACIÓN DE IMPORTACIÓN*\n\n` +
+                                `✅ Registros válidos detectados: *${validRows.length}*\n` +
+                                `⚠️ Filas omitidas: ${skipped}\n\n` +
+                                `🔍 *Ejemplo (Primeros 3):*\n`;
+
+                            validRows.slice(0, 3).forEach((r, i) => {
+                                previewMsg += `*${i + 1}.* ${r.name} (${r.phone}) - ${r.service}\n`;
+                            });
+
+                            previewMsg += `\n❓ *¿Confirmar importación?*\nResponde *SI* para guardar o *NO* para cancelar.`;
+
+                            await msg.reply(previewMsg);
                             return;
+
 
                         } catch (err) {
                             console.error('File processing error:', err);
@@ -536,11 +612,29 @@ async function handleMessage(msg) {
         'accounts': 'cuentas',
         'a': 'cuentas',
         'ayuda': 'help',
-        '?': 'help'
+        '?': 'help',
+        'fechas': 'fechas',
+        'f': 'fechas'
     };
 
     // Resolve alias to actual command
     command = aliases[command] || command;
+
+    // --- SECURITY GATE ---
+    // Commands that ANYONE can use (even if not admin)
+    const PUBLIC_COMMANDS = ['help', 'myid', 'activar', 'bot'];
+
+    // Commands requiring SUPER ADMIN (Owner) - specific checks inside cases, 
+    // but general admin commands need basic admin check.
+    // For this bot, "Admin" = "Owner/SuperAdmin". There are no "sub-admins" yet.
+    if (!PUBLIC_COMMANDS.includes(command)) {
+        if (!msg.fromMe && !isSuperAdmin(msg.from)) {
+            await msg.reply(BOT_PREFIX + '⛔ *ACCESO DENEGADO*\n\nEste comando es exclusivo para el administrador.');
+            logger.warn(`Unauthorized command attempt from ${msg.from}: ${command}`);
+            return;
+        }
+    }
+    // ---------------------
 
     try {
         switch (command) {
@@ -580,6 +674,18 @@ async function handleMessage(msg) {
                 }
                 break;
 
+            case 'sync':
+                if (!isSuperAdmin(msg.from)) return;
+                await msg.reply(BOT_PREFIX + '🔄 Sincronizando con Google Sheets...');
+                try {
+                    const sheets = require('./sheetsService');
+                    await sheets.syncData();
+                    await msg.reply(BOT_PREFIX + '✅ Sincronización completada.');
+                } catch (e) {
+                    await msg.reply(BOT_PREFIX + '❌ Error al sincronizar.');
+                }
+                break;
+
             case 'importar':
             case 'import':
                 userStates[chatId] = { step: 'WAITING_FOR_FILE', data: {}, lastInteraction: Date.now() };
@@ -606,9 +712,6 @@ async function handleMessage(msg) {
                 }
                 break;
 
-            case 'admin_gen':
-                // SUPER ADMIN COMMAND
-                // Allow if from ME (owner) OR if sender is Super Admin
                 if (!msg.fromMe && !isSuperAdmin(msg.from)) return;
 
                 const days = parseInt(args[0]);
@@ -1133,6 +1236,14 @@ async function handleMessage(msg) {
                 await msg.reply(accountsMenu);
                 break;
 
+            case 'fechas':
+                userStates[chatId] = { step: 'DATES_MENU', data: {}, lastInteraction: Date.now() };
+                await msg.reply(BOT_PREFIX + `📅 *VENCIMIENTOS*\n\n👇 *Selecciona una opción:*\n\n` +
+                    `1. 📥 Descargar Reporte Completo (CSV)\n` +
+                    `2. 🚨 Ver Vencimientos de Hoy\n` +
+                    `0. Cancelar`);
+                break;
+
             default:
                 break;
         }
@@ -1319,6 +1430,7 @@ async function handleInteractiveFlow(msg, chatId, input) {
                     await msg.reply(BOT_PREFIX + '❌ Selección inválida.');
                 }
                 break;
+            case 'SELECT_PLATFORM':
                 if (input === '0' || input.toLowerCase() === 'volver') {
                     // Go back to Category Selection
                     state.step = 'VENDER_SELECT_CATEGORY';
@@ -1575,6 +1687,23 @@ async function handleInteractiveFlow(msg, chatId, input) {
                     return;
                 }
                 state.data.salePrice = salePrice;
+
+                // --- REFERRAL POINT LOGIC (First Purchase Reward) ---
+                try {
+                    const rPhone = normalizePhone(chatId.replace('@c.us', ''));
+                    const rClient = await db.getClientByPhone(rPhone);
+                    // Check if client exists, has a referrer, and this is their FIRST purchase (0 current subs)
+                    if (rClient && rClient.referred_by) {
+                        const rSubs = await db.getAllSubscriptions(rClient.id);
+                        if (rSubs.length === 0) {
+                            await db.addReferralPoint(rClient.referred_by);
+                            // Optional: Logic to notify referrer could go here
+                            console.log(`[Referral] Added point to referrer ${rClient.referred_by} for client ${rClient.id}`);
+                        }
+                    }
+                } catch (rErr) { logger.error('Referral Point Error:', rErr); }
+                // ----------------------------------------------------
+
                 await finishSale(msg, chatId, state.data);
                 break;
 
@@ -1997,10 +2126,8 @@ async function handleInteractiveFlow(msg, chatId, input) {
                         let count = 0;
                         for (const s of subs) {
                             try {
-                                await msg.client.sendMessage(`${state.data.selectedClient.phone}@c.us`,
-                                    `🔐 *RECORDATORIO DE ACCESO*\n\nHola ${state.data.selectedClient.name}, aquí tienes tus datos de *${s.service_name}*:\n\n📧 Email: ${s.email}\n🔑 Clave: *${s.password}*\n📅 Vence: ${s.expiry_date}`);
+                                messageQueue.add(state.data.selectedClient.phone, `🔐 *RECORDATORIO DE ACCESO*\n\nHola ${state.data.selectedClient.name}, aquí tienes tus datos de *${s.service_name}*:\n\n📧 Email: ${s.email}\n🔑 Clave: *${s.password}*\n📅 Vence: ${s.expiry_date}`);
                                 count++;
-                                await new Promise(r => setTimeout(r, 1000));
                             } catch (e) { }
                         }
                         await msg.reply(BOT_PREFIX + `✅ Datos reenviados exitosamente (${count} suscripciones).`);
@@ -2192,9 +2319,8 @@ async function handleInteractiveFlow(msg, chatId, input) {
 
                     for (const phone of clients) {
                         try {
-                            await msg.client.sendMessage(`${phone}@c.us`, state.data.message);
+                            messageQueue.add(phone, state.data.message);
                             count++;
-                            await new Promise(r => setTimeout(r, 2000)); // 2s delay
                         } catch (e) {
                             console.error(`Failed to send to ${phone}`);
                         }
@@ -2459,10 +2585,8 @@ async function handleInteractiveFlow(msg, chatId, input) {
                 let notified = 0;
                 for (const c of clients) {
                     try {
-                        await msg.client.sendMessage(`${c.phone}@c.us`,
-                            `🔐 *CAMBIO DE CONTRASEÑA*\n\nHola ${c.name}, la contraseña de tu cuenta *${c.service_name}* ha cambiado.\n\n📧 Email: ${oldEmail}\n🔑 Nueva Clave: *${newPasswd}*`);
+                        messageQueue.add(c.phone, `🔐 *CAMBIO DE CONTRASEÑA*\n\nHola ${c.name}, la contraseña de tu cuenta *${c.service_name}* ha cambiado.\n\n📧 Email: ${oldEmail}\n🔑 Nueva Clave: *${newPasswd}*`);
                         notified++;
-                        await new Promise(r => setTimeout(r, 1000));
                     } catch (e) { }
                 }
 
@@ -2485,14 +2609,23 @@ async function handleInteractiveFlow(msg, chatId, input) {
                 let rNotified = 0;
                 for (const c of rClients) {
                     try {
-                        await msg.client.sendMessage(`${c.phone}@c.us`,
-                            `🔄 *CAMBIO DE CUENTA*\n\nHola ${c.name}, tus credenciales de *${c.service_name}* han cambiado.\n\n📧 Nuevo Email: ${nEmail}\n🔑 Nueva Clave: *${nPass}*`);
+                        messageQueue.add(c.phone, `🔄 *CAMBIO DE CUENTA*\n\nHola ${c.name}, tus credenciales de *${c.service_name}* han cambiado.\n\n📧 Nuevo Email: ${nEmail}\n🔑 Nueva Clave: *${nPass}*`);
                         rNotified++;
-                        await new Promise(r => setTimeout(r, 1000));
                     } catch (e) { }
                 }
 
                 await msg.reply(BOT_PREFIX + `✅ Cuenta reemplazada y ${rNotified} clientes notificados.`);
+                delete userStates[chatId];
+                break;
+
+            case 'CONFIRM_OCR_PAYMENT':
+                if (input.toLowerCase() === 'si' || input.toLowerCase() === 'sí') {
+                    const rData = state.data.receipt;
+                    await msg.reply(BOT_PREFIX + `✅ *Pago Reportado*\n\nTu pago de $${rData.amount} (Ref: ${rData.reference}) ha sido enviado a validación.\nTe notificaremos en breve.`);
+                    logger.info(`[OCR] Payment Reported: ${rData.amount} (Ref: ${rData.reference}) by ${chatId}`);
+                } else {
+                    await msg.reply(BOT_PREFIX + '❌ Reporte cancelado.');
+                }
                 delete userStates[chatId];
                 break;
 
@@ -2504,6 +2637,46 @@ async function handleInteractiveFlow(msg, chatId, input) {
                 } else {
                     await msg.reply(BOT_PREFIX + '❌ Eliminación cancelada.');
                     state.step = 'ACCOUNTS_MANAGE_MENU';
+                }
+                break;
+
+            case 'IMPORT_CONFIRM':
+                if (input.toLowerCase() === 'si') {
+                    const rows = state.data.importPreview;
+                    let importedClients = 0;
+                    let importedSubs = 0;
+                    let errors = 0;
+                    let skipped = 0;
+
+                    await msg.reply(BOT_PREFIX + '⏳ Procesando importación... Esto puede tomar unos segundos.');
+
+                    for (const r of rows) {
+                        try {
+                            let clientId;
+                            const existingClient = await db.getClientByPhone(r.phone);
+                            if (existingClient) {
+                                clientId = existingClient.id;
+                            } else {
+                                clientId = await db.addClient(r.phone, r.name);
+                                importedClients++;
+                            }
+
+                            await db.addSubscription(clientId, r.service, r.expiry, r.email, r.password, 'Perfil Importado', r.pin);
+                            importedSubs++;
+                        } catch (e) {
+                            console.error('Import Error:', e);
+                            errors++;
+                        }
+                    }
+
+                    await msg.reply(BOT_PREFIX + `✅ *IMPORTACIÓN EXITOSA*\n\n` +
+                        `👥 Clientes Nuevos: ${importedClients}\n` +
+                        `📺 Suscripciones: ${importedSubs}\n` +
+                        `❌ Errores: ${errors}`);
+                    delete userStates[chatId];
+                } else {
+                    await msg.reply(BOT_PREFIX + '❌ Importación cancelada.');
+                    delete userStates[chatId];
                 }
                 break;
 
@@ -2559,8 +2732,7 @@ async function checkReminders(client) {
                     msg = `⛔ *SERVICIO VENCIDO*\n\nHola ${sub.name}, tu suscripción de *${sub.service_name}* ha vencido.\n\nPor favor realiza el pago para reactivar el servicio.`;
                 }
 
-                await client.sendMessage(`${sub.phone}@c.us`, msg);
-                await new Promise(r => setTimeout(r, 1000)); // Throttle
+                messageQueue.add(sub.phone, msg); // Use Queue
             } catch (err) {
                 console.error(`Failed to send reminder to ${sub.name}:`, err);
             }
