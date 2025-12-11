@@ -53,6 +53,7 @@ const client = new Client({
     // authTimeoutMs: 0, // Keep disabled to prevent forcing
     // qrMaxRetries: 0, // Keep disabled to prevent forcing
     puppeteer: {
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
@@ -61,17 +62,7 @@ const client = new Client({
             '--no-first-run',
             '--no-zygote',
             '--single-process',
-            '--disable-gpu',
-            '--disable-features=IsolateOrigins,site-per-process',
-            '--disable-extensions',
-            '--disable-component-extensions-with-background-pages',
-            '--disable-default-apps',
-            '--mute-audio',
-            '--no-default-browser-check',
-            '--autoplay-policy=user-gesture-required',
-            '--headless=new',
-            '--disable-software-rasterizer',
-            '--blink-settings=imagesEnabled=false'
+            '--disable-gpu'
         ]
     }
 });
@@ -117,4 +108,63 @@ client.initialize().then(() => {
 }).catch(err => {
     botStatus = 'Error Launching Browser: ' + err.message;
     logger.error('Error Launching Browser:', err);
+});
+
+// --- HTTP SERVER FOR FLY.IO & QR DISPLAY ---
+const http = require('http');
+const PORT = process.env.PORT || 3000;
+
+const server = http.createServer(async (req, res) => {
+    if (req.url === '/') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+
+        let html = `
+        <html>
+            <head>
+                <title>WhatsApp Bot Status</title>
+                <meta http-equiv="refresh" content="10">
+                <style>
+                    body { font-family: sans-serif; text-align: center; padding: 20px; }
+                    .status { padding: 10px; border-radius: 5px; display: inline-block; margin-bottom: 20px; }
+                    .ready { background-color: #d4edda; color: #155724; }
+                    .error { background-color: #f8d7da; color: #721c24; }
+                    .loading { background-color: #fff3cd; color: #856404; }
+                </style>
+            </head>
+            <body>
+                <h1>🤖 Bot Status</h1>
+                <div class="status ${botStatus.includes('Ready') ? 'ready' : botStatus.includes('Error') || botStatus.includes('Failed') ? 'error' : 'loading'}">
+                    <h3>${botStatus}</h3>
+                </div>
+        `;
+
+        if (latestQr) {
+            try {
+                const qrImage = await qrcodeGen.toDataURL(latestQr);
+                html += `
+                    <div>
+                        <p>Scan this QR Code to login:</p>
+                        <img src="${qrImage}" alt="QR Code" style="width: 300px; height: 300px; border: 1px solid #ccc;"/>
+                    </div>
+                `;
+            } catch (err) {
+                html += `<p>Error generating QR image: ${err.message}</p>`;
+            }
+        }
+
+        html += `
+                <p><small>Last Update: ${new Date().toLocaleString()}</small></p>
+            </body>
+        </html>
+        `;
+
+        res.end(html);
+    } else {
+        res.writeHead(404);
+        res.end('Not Found');
+    }
+});
+
+server.listen(PORT, () => {
+    logger.info(`Server running on port ${PORT}`);
 });

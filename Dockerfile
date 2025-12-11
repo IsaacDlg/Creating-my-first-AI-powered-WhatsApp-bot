@@ -44,8 +44,8 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Environment Variables
-# ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
-#     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 WORKDIR /usr/src/app
 
@@ -61,7 +61,4 @@ COPY . .
 RUN mkdir -p /usr/src/app/.wwebjs_auth && \
     mkdir -p /usr/src/app/.wwebjs_cache
 
-COPY run.sh .
-RUN chmod +x run.sh
-
-CMD ["./run.sh"]
+CMD ["npm", "start"]
