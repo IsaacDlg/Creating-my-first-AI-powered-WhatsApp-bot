@@ -340,7 +340,7 @@ async function handleMessage(msg) {
 
     // PREVENT SELF-RESPONSE FOR ADMIN COMMANDS
     // We want the owner to be able to use !admin_gen from their own phone.
-    if (msg.fromMe && !body.startsWith('!')) return;
+    if (msg.fromMe && !body.startsWith('!') && !userStates[chatId]) return;
 
     // PREVENT INFINITE LOOP: Ignore messages sent by the bot itself (starting with prefix)
     // REMOVED: To allow owner to use bot from host phone. Bot replies must NOT start with a valid command.
