@@ -61,8 +61,9 @@ const client = new Client({
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
             '--no-zygote',
-            '--single-process',
-            '--disable-gpu'
+            '--disable-gpu',
+            '--disable-gpu-sandbox',
+            '--disable-software-rasterizer'
         ]
     }
 });
@@ -77,6 +78,11 @@ client.on('qr', (qr) => {
     qrcode.generate(qr, { small: true }, function (qrcode) {
         console.log(qrcode); // Keep console.log for terminal QR
     });
+});
+
+client.on('authenticated', () => {
+    logger.info('AUTHENTICATED', 'Session restored or created successfully');
+    botStatus = 'Authenticated';
 });
 
 client.on('ready', () => {
@@ -107,7 +113,7 @@ client.initialize().then(() => {
     botStatus = 'Browser Launched - Waiting for WhatsApp...';
 }).catch(err => {
     botStatus = 'Error Launching Browser: ' + err.message;
-    logger.error('Error Launching Browser:', err);
+    logger.error('Error Launching Browser:', err.message, err.stack);
 });
 
 // --- HTTP SERVER FOR FLY.IO & QR DISPLAY ---
